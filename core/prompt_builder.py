@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .embeddings import EmbeddingClient
 from .repository import Repository
 
 # Base fixa. As regras/exemplos do banco são ANEXADOS a isto.
@@ -29,10 +30,19 @@ CONCRETUDE
 
 
 class PromptBuilder:
-    def __init__(self, repo: Repository):
+    def __init__(
+        self,
+        repo: Repository,
+        embedding_client: EmbeddingClient | None = None,
+    ):
         self.repo = repo
+        self.embedding_client = embedding_client or EmbeddingClient()
 
-    def build(self, contexto: str | None = None) -> str:
+    def build(
+        self,
+        contexto: str | None = None,
+        texto_alvo: str | None = None,
+    ) -> str:
         partes = [BASE]
 
         regras = self.repo.get_rules()
@@ -40,7 +50,26 @@ class PromptBuilder:
             linhas = [f"- {r['regra']}" for r in regras]
             partes.append("REGRAS ADICIONAIS (do seu perfil):\n" + "\n".join(linhas))
 
-        amostras = self.repo.get_samples(contexto=contexto, limit=3)
+        amostras = None
+        pares = None
+        if texto_alvo and self.embedding_client is not None:
+            try:
+                if self.embedding_client.available():
+                    query_embedding = self.embedding_client.embed(texto_alvo)
+                    amostras = self.repo.get_samples_by_similarity(
+                        query_embedding, contexto=contexto, limit=3
+                    )
+                    pares = self.repo.get_pairs_by_similarity(query_embedding, limit=2)
+            except Exception:
+                # Falhas de rede, modelo ou vetores inválidos nunca impedem o prompt.
+                amostras = None
+                pares = None
+
+        if not amostras:
+            amostras = self.repo.get_samples(contexto=contexto, limit=3)
+        if not pares:
+            pares = self.repo.get_pairs(limit=2)
+
         if amostras:
             blocos = [f'"""{a["texto"]}"""' for a in amostras]
             partes.append(
@@ -48,7 +77,6 @@ class PromptBuilder:
                 "NÃO copie o conteúdo):\n" + "\n\n".join(blocos)
             )
 
-        pares = self.repo.get_pairs(limit=2)
         if pares:
             blocos = [
                 f"ANTES (cheiro de IA):\n{p['antes']}\n\nDEPOIS (humanizado):\n{p['depois']}"

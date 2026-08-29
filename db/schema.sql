@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS style_samples (
   texto     TEXT NOT NULL,
   contexto  TEXT,                       -- "email", "blog", "academico"...
   tags      TEXT,                       -- separadas por vírgula
+  embedding TEXT,                       -- vetor JSON para busca semântica
   criado_em TEXT DEFAULT (datetime('now'))
 );
 
@@ -24,6 +25,7 @@ CREATE TABLE IF NOT EXISTS rewrite_pairs (
   antes     TEXT NOT NULL,
   depois    TEXT NOT NULL,
   contexto  TEXT,
+  embedding TEXT,                       -- vetor JSON do texto humanizado
   criado_em TEXT DEFAULT (datetime('now'))
 );
 

@@ -9,6 +9,7 @@ Uso:
   python main.py avaliar 12 5 --editada "..." dá nota (1-5) a uma geração
   python main.py preview                       mostra o prompt montado
   python main.py ping                          testa a conexão com o LM Studio
+  python main.py reindex                       indexa exemplos antigos
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from core.embeddings import EmbeddingClient
 from core.llm_client import LLMClient
 from core.prompt_builder import PromptBuilder
 from core.repository import SqliteRepository
@@ -28,6 +30,18 @@ def _print(titulo: str, corpo: str) -> None:
     print(f"\n=== {titulo} ===\n{corpo}\n")
 
 
+def _embedding_or_none(texto: str) -> list[float] | None:
+    """Gera um vetor sem transformar indisponibilidade em erro da CLI."""
+    try:
+        return EmbeddingClient().embed(texto)
+    except Exception:
+        print(
+            "Aviso: embeddings indisponíveis; item salvo sem vetor "
+            "(rode 'python main.py reindex' depois)."
+        )
+        return None
+
+
 def cmd_humanizar(repo, args) -> None:
     llm = LLMClient()
     if not llm.ping():
@@ -36,7 +50,18 @@ def cmd_humanizar(repo, args) -> None:
             "Abra o LM Studio, carregue o modelo Llama 3.1 8B Instruct e "
             "clique em 'Start Server' na aba Developer."
         )
-    prompt = PromptBuilder(repo).build(contexto=args.contexto)
+
+    embedding_client = EmbeddingClient()
+    if embedding_client.available():
+        builder = PromptBuilder(repo, embedding_client=embedding_client)
+    else:
+        print(
+            "Aviso: modelo de embeddings indisponível; "
+            "usando exemplos mais recentes."
+        )
+        builder = PromptBuilder(repo, embedding_client=embedding_client)
+
+    prompt = builder.build(contexto=args.contexto, texto_alvo=args.texto)
     saida = llm.humanize(prompt, args.texto)
     gen_id = repo.save_generation(prompt, args.texto, saida)
     _print(f"RESULTADO (geração #{gen_id})", saida)
@@ -45,7 +70,13 @@ def cmd_humanizar(repo, args) -> None:
 
 
 def cmd_add_sample(repo, args) -> None:
-    sid = repo.add_sample(args.texto, contexto=args.contexto or "", tags=args.tags or "")
+    embedding = _embedding_or_none(args.texto)
+    sid = repo.add_sample(
+        args.texto,
+        contexto=args.contexto or "",
+        tags=args.tags or "",
+        embedding=embedding,
+    )
     print(f"Amostra de estilo #{sid} salva.")
 
 
@@ -55,7 +86,13 @@ def cmd_add_rule(repo, args) -> None:
 
 
 def cmd_add_pair(repo, args) -> None:
-    pid = repo.add_pair(args.antes, args.depois, contexto=args.contexto or "")
+    embedding = _embedding_or_none(args.depois)
+    pid = repo.add_pair(
+        args.antes,
+        args.depois,
+        contexto=args.contexto or "",
+        embedding=embedding,
+    )
     print(f"Par de reescrita #{pid} salvo.")
 
 
@@ -66,8 +103,19 @@ def cmd_avaliar(repo, args) -> None:
     repo.rate_generation(args.id, args.nota, editada=args.editada or "")
     # Loop de aprendizado: sua versão editada vira exemplo de estilo E par.
     if args.editada:
-        repo.add_sample(args.editada, contexto="editado", tags="feedback")
-        repo.add_pair(gen["saida"], args.editada, contexto="editado")
+        embedding = _embedding_or_none(args.editada)
+        repo.add_sample(
+            args.editada,
+            contexto="editado",
+            tags="feedback",
+            embedding=embedding,
+        )
+        repo.add_pair(
+            gen["saida"],
+            args.editada,
+            contexto="editado",
+            embedding=embedding,
+        )
         print("Nota salva. Sua versão editada virou nova amostra + par de reescrita.")
         print("O prompt já melhorou para as próximas gerações.")
     else:
@@ -81,6 +129,31 @@ def cmd_preview(repo, args) -> None:
 def cmd_ping(repo, args) -> None:
     ok = LLMClient().ping()
     print("LM Studio OK" if ok else "LM Studio não respondeu (inicie o servidor).")
+
+
+def cmd_reindex(repo, args) -> None:
+    embedding_client = EmbeddingClient()
+    if not embedding_client.available():
+        sys.exit(
+            "Erro: modelo de embeddings indisponível. Carregue "
+            "text-embedding-nomic-embed-text-v1.5 no LM Studio e tente novamente."
+        )
+
+    rows = repo.iter_rows_without_embedding()
+    indexed = 0
+    try:
+        for start in range(0, len(rows), 64):
+            batch = rows[start : start + 64]
+            vectors = embedding_client.embed_many([row["texto"] for row in batch])
+            if len(vectors) != len(batch):
+                raise RuntimeError("quantidade inesperada de embeddings na resposta")
+            for row, vector in zip(batch, vectors):
+                repo.save_embedding(row["row_type"], row["id"], vector)
+                indexed += 1
+    except Exception as exc:
+        sys.exit(f"Erro durante a reindexação: {exc}")
+
+    print(f"{indexed} linha(s) indexada(s).")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -122,6 +195,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     pg = sub.add_parser("ping", help="testa conexão com o LM Studio")
     pg.set_defaults(func=cmd_ping)
+
+    ri = sub.add_parser("reindex", help="indexa amostras e pares sem embedding")
+    ri.set_defaults(func=cmd_reindex)
 
     return p
 
