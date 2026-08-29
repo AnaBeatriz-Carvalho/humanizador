@@ -156,6 +156,60 @@ def cmd_reindex(repo, args) -> None:
     print(f"{indexed} linha(s) indexada(s).")
 
 
+def _parse_blocos(texto: str) -> list[tuple[str, str]]:
+    """Divide o arquivo em (contexto, amostra).
+
+    Blocos separados por uma linha só com '==='. Cada bloco pode começar com
+    uma linha '@contexto' que define o contexto daquela amostra.
+    """
+    brutos: list[list[str]] = [[]]
+    for linha in texto.splitlines():
+        if linha.strip() == "===":
+            brutos.append([])
+        else:
+            brutos[-1].append(linha)
+
+    itens: list[tuple[str, str]] = []
+    for linhas in brutos:
+        if not any(l.strip() for l in linhas):
+            continue
+        contexto = ""
+        corpo = linhas
+        if corpo and corpo[0].strip().startswith("@"):
+            contexto = corpo[0].strip()[1:].strip()
+            corpo = corpo[1:]
+        amostra = "\n".join(corpo).strip()
+        if amostra:
+            itens.append((contexto, amostra))
+    return itens
+
+
+def cmd_importar(repo, args) -> None:
+    caminho = Path(args.arquivo)
+    if not caminho.exists():
+        sys.exit(f"Arquivo não encontrado: {caminho}")
+    itens = _parse_blocos(caminho.read_text(encoding="utf-8"))
+    if not itens:
+        sys.exit("Nenhuma amostra encontrada (use '===' entre os blocos).")
+
+    ec = EmbeddingClient()
+    vetores: list[list[float] | None] = [None] * len(itens)
+    if ec.available():
+        try:
+            vetores = ec.embed_many([texto for _, texto in itens])
+        except Exception:
+            print("Aviso: falha nos embeddings; importando sem vetor (rode 'reindex' depois).")
+            vetores = [None] * len(itens)
+    else:
+        print("Aviso: embeddings indisponíveis; importando sem vetor (rode 'reindex' depois).")
+
+    n = 0
+    for (contexto, texto), vetor in zip(itens, vetores):
+        repo.add_sample(texto, contexto=contexto, tags="import", embedding=vetor)
+        n += 1
+    print(f"{n} amostra(s) importada(s).")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Humanizador de textos (anti-IA).")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -198,6 +252,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     ri = sub.add_parser("reindex", help="indexa amostras e pares sem embedding")
     ri.set_defaults(func=cmd_reindex)
+
+    im = sub.add_parser(
+        "importar", help="importa várias amostras de um arquivo (blocos separados por ===)"
+    )
+    im.add_argument("arquivo")
+    im.set_defaults(func=cmd_importar)
 
     return p
 
