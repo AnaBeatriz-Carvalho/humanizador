@@ -17,16 +17,19 @@ class LLMClient:
         base_url: str = DEFAULT_BASE_URL,
         model: str = DEFAULT_MODEL,
         temperature: float = 0.8,
+        max_tokens: int = 600,
     ):
         # api_key é ignorada pelo LM Studio, mas o SDK exige algum valor.
         self.client = OpenAI(base_url=base_url, api_key="lm-studio")
         self.model = model
         self.temperature = temperature
+        self.max_tokens = max_tokens
 
     def humanize(self, system_prompt: str, texto: str) -> str:
         resp = self.client.chat.completions.create(
             model=self.model,
             temperature=self.temperature,
+            max_tokens=self.max_tokens,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Reescreva o texto a seguir:\n\n{texto}"},
